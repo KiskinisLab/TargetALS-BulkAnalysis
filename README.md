@@ -1,5 +1,5 @@
 # TargetALS-BulkAnalysis
-Repository for code used in the ALS Neuroimmune manuscript
+Repository for code used in the ALS Neuroimmune manuscript. Bulk data downloaded from GEO accession GSE137810
 
 Contents:
 
