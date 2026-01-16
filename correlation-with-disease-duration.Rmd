@@ -1,0 +1,812 @@
+---
+title: "correlation-with-disease-duration"
+output: html_document
+date: "2025-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R}
+library(tidyverse)
+```
+
+
+
+```{R}
+allMD<-read.table("../output/DESeq2/2023/2023-metadata-v2-fixed-filtered.txt", sep="\t", header=T, stringsAsFactors = F, quote="")
+
+cervMD<-allMD[which(allMD$Sample.Source=="Spinal_Cord_Cervical"),]
+thorMD<-allMD[which(allMD$Sample.Source=="Spinal_Cord_Thoracic"),]
+lumbMD<-allMD[which(allMD$Sample.Source=="Spinal_Cord_Lumbar"),]
+
+### Disease Duration
+mdDD<-allMD[,c("ExternalSampleId", "ExternalSubjectId", "Subject.Group2", "Disease.Duration.in.Months")]
+mdDD$Disease.Duration.in.Months<-as.numeric(mdDD$Disease.Duration.in.Months)
+
+mdDD<-mdDD[!is.na(mdDD$Disease.Duration.in.Months),]
+cervDD<-mdDD[which(mdDD$ExternalSampleId %in% cervMD$ExternalSampleId),]
+thorDD<-mdDD[which(mdDD$ExternalSampleId %in% thorMD$ExternalSampleId),]
+lumbDD<-mdDD[which(mdDD$ExternalSampleId %in% lumbMD$ExternalSampleId),]
+
+
+### Age of onset
+mdSO<-allMD[,c("ExternalSampleId", "ExternalSubjectId", "Subject.Group2", "Age.at.Symptom.Onset")]
+mdSO$Age.at.Symptom.Onset<-as.numeric(mdSO$Age.at.Symptom.Onset)
+
+mdSO<-mdSO[!is.na(mdSO$Age.at.Symptom.Onset),]
+cervSO<-mdSO[which(mdSO$ExternalSampleId %in% cervMD$ExternalSampleId),]
+
+
+```
+
+### Cervical spinal cord
+
+```{R}
+###
+cervCPM<-read.table("../output/DESeq2/2023/sva-vsd/noPrep/disease-groups/TMMCPM/Spinal_Cord_Cervical-AllGroups.vs.Healthy.txt", sep="\t", header=T, stringsAsFactors = F, quote="")
+
+cervCPM
+
+corList<-list()
+
+ddList<-list()
+soList<-list()
+
+for(i in 1:nrow(cervCPM)){
+  thisRow<-cervCPM[i,]
+  
+  exprVals<-thisRow[,4:ncol(thisRow)]
+  thisRow %>%
+    dplyr::select(4:ncol(thisRow)) %>%
+    t() %>%
+    as.data.frame() %>%
+    dplyr::rename(CPM=1) %>%
+    dplyr::mutate(logCPM=log2(CPM+1)) %>%
+    rownames_to_column("Sample") %>%
+    inner_join(mdDD, by=c("Sample"="ExternalSampleId")) -> exprJoined
+  
+  corVal<-cor(exprJoined$CPM, exprJoined$Disease.Duration.in.Months)
+  corValLog<-cor(exprJoined$logCPM, exprJoined$Disease.Duration.in.Months)
+  tmpDF<-data.frame(GeneID=thisRow$ensembl_gene_id, GeneName=thisRow$external_gene_name, corExprDuration=corVal, corLogExprDuration=corValLog)
+  corList[[i]]<-tmpDF
+  
+  tmpLM<-lm(exprJoined$Disease.Duration.in.Months ~ exprJoined$logCPM)
+  tmpLMSum<-summary(tmpLM)
+  pVal<-tmpLMSum$coefficients[2,4]
+  r2<-tmpLMSum$r.squared
+  
+  tmpDF<-data.frame(GeneID=thisRow$ensembl_gene_id, GeneName=thisRow$external_gene_name, corLogExpr=corValLog, R2=r2, pVal=pVal)
+  ddList[[i]]<-tmpDF
+  
+  thisRow %>%
+    dplyr::select(4:ncol(thisRow)) %>%
+    t() %>%
+    as.data.frame() %>%
+    dplyr::rename(CPM=1) %>%
+    dplyr::mutate(logCPM=log2(CPM+1)) %>%
+    rownames_to_column("Sample") %>%
+    inner_join(mdSO, by=c("Sample"="ExternalSampleId")) -> exprJoined
+  
+  corValLog<-cor(exprJoined$logCPM, exprJoined$Age.at.Symptom.Onset)
+  tmpLM<-lm(exprJoined$Age.at.Symptom.Onset ~ exprJoined$logCPM)
+  tmpLMSum<-summary(tmpLM)
+  pVal<-tmpLMSum$coefficients[2,4]
+  r2<-tmpLMSum$r.squared
+  
+  tmpDF<-data.frame(GeneID=thisRow$ensembl_gene_id, GeneName=thisRow$external_gene_name, corLogExpr=corValLog, R2=r2, pVal=pVal)
+  soList[[i]]<-tmpDF
+}
+
+corDF<-bind_rows(corList)
+write.table(corDF, "../output/expression-disease-correlation/Expression-DiseaseDuration-correlation-v1.txt", sep="\t", col.names = T, row.names = F, quote=F)
+
+ddDF<-bind_rows(ddList)
+ddDF$FDR<-p.adjust(ddDF$pVal, method = "fdr")
+write.table(ddDF, "../output/expression-disease-correlation/logExpression-DiseaseDuration-correlation-v2.txt", sep="\t", col.names = T, row.names = F, quote=F)
+
+ddDF %>%
+   mutate(color=ifelse(FDR<0.05 & corLogExpr>0, "firebrick3",
+                               ifelse(FDR<0.05 & corLogExpr<0, "dodgerblue3", "black"))) %>%
+  mutate(label=ifelse(FDR<0.05, GeneName, NA)) %>%
+  ggplot(aes(x=corLogExpr, y = -log10(FDR), color=color, label=label))+
+  #geom_point()+
+  geom_point(position = position_jitter(width = 0.025, height = 0.025, seed = 42))+
+  ggrepel::geom_text_repel(position = position_jitter(width = 0.025, height = 0.025, seed = 42))+
+  theme_classic()+
+  scale_color_identity()+
+  labs(x="Correlation", y="-log10(FDR)")+
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/Correlation-disease-duration-volcanoPlot.png", width = 8, height = 6)
+ggsave("../plots/expression-disease-duration-correlation/Correlation-disease-duration-volcanoPlot.pdf", width = 8, height = 6)
+
+ddDF %>%
+   mutate(color=ifelse(FDR<0.05 & corLogExpr>0, "firebrick3",
+                               ifelse(FDR<0.05 & corLogExpr<0, "dodgerblue3", "black"))) %>%
+  mutate(label=ifelse(FDR<0.05 & corLogExpr<0, GeneName, NA)) %>%
+  ggplot(aes(x=corLogExpr, y = -log10(FDR), color=color, label=label))+
+  #geom_point()+
+  geom_point(position = position_jitter(width = 0.025, height = 0.025, seed = 42))+
+  ggrepel::geom_text_repel(position = position_jitter(width = 0.025, height = 0.025, seed = 42))+
+  theme_classic()+
+  scale_color_identity()+
+  labs(x="Correlation", y="-log10(FDR)")+
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/Correlation-disease-duration-volcanoPlot-v2.png", width = 8, height = 6)
+ggsave("../plots/expression-disease-duration-correlation/Correlation-disease-duration-volcanoPlot-v2.pdf", width = 8, height = 6)
+
+
+
+###
+soDF<-bind_rows(soList)
+soDF$FDR<-p.adjust(soDF$pVal, method = "fdr")
+write.table(soDF, "../output/expression-disease-correlation/logExpression-AgeOfOnset-correlation.txt", sep="\t", col.names = T, row.names = F, quote=F)
+
+soDF %>%
+  mutate(color=ifelse(FDR<0.05 & corLogExpr>0, "firebrick3",
+                               ifelse(FDR<0.05 & corLogExpr<0, "dodgerblue3", "black"))) %>%
+  mutate(label=ifelse(FDR<0.05, GeneName, NA)) %>%
+  ggplot(aes(x=corLogExpr, y = -log10(FDR), color=color, label=label))+
+  #geom_point()+
+  geom_point(position = position_jitter(width = 0.025, height = 0.025, seed = 42))+
+  ggrepel::geom_text_repel(position = position_jitter(width = 0.025, height = 0.025, seed = 42))+
+  theme_classic()+
+  scale_color_identity()+
+  labs(x="Correlation", y="-log10(FDR)")+
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/Correlation-AgeOfOnset-volcanoPlot.png", width = 8, height = 6)
+
+
+png("../plots/expression-disease-duration-correlation/Cervical-correlation-with-CPM.png", width = 2400, height = 1600, res = 320)
+hist(corDF$corExprDuration, main = "Correlation of disease duration and gene expression (CPM)", xlab = "Correlation")
+dev.off()
+
+png("../plots/expression-disease-duration-correlation/Cervical-correlation-with-logCPM.png", width = 2400, height = 1600, res = 320)
+hist(corDF$corLogExprDuration, main = "Correlation of disease duration and gene expression (logCPM)", xlab = "Correlation")
+dev.off()
+```
+
+### Plot 6 genes together
+
+```{R}
+### Plot CHIT1 vs. disease duration
+cervCPM %>%
+  dplyr::filter(external_gene_name=="CHIT1") %>% 
+  dplyr::select(4:ncol(cervCPM)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM.CHIT1=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(mdDD, by=c("Sample"="ExternalSampleId")) -> exprJoined
+chit.dd<-exprJoined
+
+### APOC1
+cervCPM %>%
+  dplyr::filter(external_gene_name=="APOC1") %>% 
+  dplyr::select(4:ncol(cervCPM)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM.APOC1=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(mdDD, by=c("Sample"="ExternalSampleId")) -> exprJoined
+apoc.dd<-exprJoined
+
+### C1QC
+cervCPM %>%
+  dplyr::filter(external_gene_name=="C1QC") %>% 
+  dplyr::select(4:ncol(cervCPM)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM.C1QC=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(mdDD, by=c("Sample"="ExternalSampleId")) -> exprJoined
+c1qc.dd<-exprJoined
+
+### C1QB
+cervCPM %>%
+  dplyr::filter(external_gene_name=="C1QB") %>% 
+  dplyr::select(4:ncol(cervCPM)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM.C1QB=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(mdDD, by=c("Sample"="ExternalSampleId")) -> exprJoined
+c1qb.dd<-exprJoined
+
+### C1QA
+cervCPM %>%
+  dplyr::filter(external_gene_name=="C1QA") %>% 
+  dplyr::select(4:ncol(cervCPM)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM.C1QA=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(mdDD, by=c("Sample"="ExternalSampleId")) -> exprJoined
+c1qa.dd<-exprJoined
+
+### Add LSP1
+cervCPM %>%
+  dplyr::filter(external_gene_name=="LSP1") %>% 
+  dplyr::select(4:ncol(cervCPM)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM.LSP1=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(mdDD, by=c("Sample"="ExternalSampleId")) -> exprJoined
+lsp.dd<-exprJoined
+
+cor.test(chit.dd$logCPM.CHIT1, chit.dd$Disease.Duration.in.Months)
+cor.test(lsp.dd$logCPM.LSP1, lsp.dd$Disease.Duration.in.Months)
+
+geneList<-list(chit.dd, apoc.dd, c1qa.dd, c1qb.dd, c1qc.dd, lsp.dd)
+geneList %>%
+  purrr::reduce(inner_join, by=c("Sample", "ExternalSubjectId", "Subject.Group2", "Disease.Duration.in.Months")) -> sixGenes
+
+sixGenes %>%
+  dplyr::select(c("Sample", "ExternalSubjectId", "Subject.Group2", "Disease.Duration.in.Months"), contains("logCPM")) %>%
+  pivot_longer(cols = contains("logCPM"), names_to = "gene", values_to = "logCPM") %>%
+  mutate(gene = str_sub(gene, start = 8)) %>%
+  ggplot(aes(x=Disease.Duration.in.Months, y=logCPM, color=gene))+
+  geom_point(size=2, alpha=0.5)+
+  geom_smooth(method = "lm", se = F)+
+  scale_color_discrete(type = RColorBrewer::brewer.pal(n = 9, name = "Set1"))+
+  theme_classic()+
+  theme(axis.text = element_text(size=14),
+        axis.title = element_text(size = 16))+
+  labs(x="Disease duration in months", y = "log2(CPM)", color="Gene")
+ggsave("../plots/expression-disease-duration-correlation/6Genes-and-diseaseDuration-v2.pdf", width = 8, height = 6)
+
+```
+
+### GSEA using correlation as ranking
+
+```{R}
+library(fgsea)
+goAll<-gmtPathways("../../../gsea-dbs/c5.go.v2023.2.Hs.symbols.gmt")
+pathwaysAll<-gmtPathways("../../../gsea-dbs/c2.all.v2023.2.Hs.symbols.gmt")
+cts<-gmtPathways("../../../gsea-dbs/c8.all.v7.5.1.symbols.gmt")
+
+ranks<-corDF$corLogExprDuration
+names(ranks)<-corDF$GeneName
+ranks<-ranks[!duplicated(names(ranks))]
+
+gseaRes<-fgseaMultilevel(pathways = c(goAll, pathwaysAll, cts), stats = ranks,  eps = 0)
+gseaResOut<-gseaRes
+gseaResOut$leadingEdge<-unlist(lapply(gseaResOut$leadingEdge, FUN = function(x){paste0(x, collapse = ", ")}))
+write.table(gseaResOut, "../output/expression-disease-correlation/logExpression-DiseaseDuration-correlation-GSEA.txt", sep="\t", col.names = T, row.names = F, quote=F)
+
+gseaRes2<-fgseaMultilevel(pathways = c(goAll, pathwaysAll), stats = ranks, eps = 0)
+
+gseaRes$forViz<-F
+gseaRes$forViz<-ifelse(grepl(gseaRes$pathway, pattern="^GOBP"), T, gseaRes$forViz)
+gseaRes$forViz<-ifelse(grepl(gseaRes$pathway, pattern="^REACTOME"), T, gseaRes$forViz)
+gseaRes$forViz<-ifelse(grepl(gseaRes$pathway, pattern="^FAN_EMBRYONIC_CTX_"), T, gseaRes$forViz)
+
+gseaRes$nameForPlot<-gseaRes$pathway
+gseaRes$nameForPlot<-ifelse(grepl(gseaRes$pathway, pattern="^FAN_EMBRYONIC_CTX_"), str_sub(gseaRes$pathway, start = 19), gseaRes$nameForPlot)
+gseaRes$nameForPlot<-ifelse(grepl(gseaRes$pathway, pattern="^GOBP|^REACTOME"), unlist(lapply(str_split(gseaRes$pathway, pattern = "_", n = 2), "[[", 2)), gseaRes$nameForPlot)
+gseaRes$nameForPlot<-str_replace_all(gseaRes$nameForPlot, pattern = "_", replacement = " ")
+
+gseaRes$type<-"black"
+gseaRes$type<-ifelse(grepl(gseaRes$pathway, pattern="^FAN_EMBRYONIC_CTX_"), "orange", gseaRes$type)
+gseaRes$type<-ifelse(grepl(gseaRes$pathway, pattern="^GOBP"), "red", gseaRes$type)
+gseaRes$type<-ifelse(grepl(gseaRes$pathway, pattern="^REACTOME"), "steelblue", gseaRes$type)
+
+gseaRes %>%
+  dplyr::filter(forViz==T) %>%
+  dplyr::filter(NES>0) %>%
+  dplyr::arrange(padj) %>% 
+  dplyr::slice_head(n = 10) %>%
+  ggplot(aes(x=NES, y=reorder(nameForPlot, -padj), fill= -log10(padj)))+
+  geom_bar(stat = "identity")+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))+
+  theme_classic()+
+  #theme(axis.text.y = element_text(color = type))+
+  labs(x="NES", y="Term", fill="-log10(FDR)")
+ggsave("../plots/expression-disease-duration-correlation/terms-with-positive-disease-duration-correlation.pdf", width = 8, height = 6)
+
+gseaRes %>%
+  dplyr::filter(forViz==T) %>%
+  dplyr::filter(NES<0) %>%
+  dplyr::arrange(padj) %>% 
+  dplyr::slice_head(n = 10) %>%
+  ggplot(aes(x=NES, y=reorder(nameForPlot, -padj), fill= -log10(padj)))+
+  geom_bar(stat = "identity")+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title=element_text(size=16))+
+  #theme(axis.text.y = element_text(color = type))+
+  labs(x="NES", y="Term", fill="-log10(FDR)")
+ggsave("../plots/expression-disease-duration-correlation/terms-with-negative-disease-duration-correlation.pdf", width = 8, height = 6)
+
+gseaRes %>%
+  dplyr::filter(forViz==T) %>%
+  dplyr::filter(NES<0) %>%
+  dplyr::arrange(padj) %>% 
+  dplyr::slice_head(n = 10) %>%
+  ggplot(aes(x=NES, y=reorder(nameForPlot, -NES), fill= -log10(padj)))+
+  geom_bar(stat = "identity")+
+  geom_text(aes(label=signif(padj,3)), hjust = 0)+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30))+
+  theme_classic()+
+  scale_fill_distiller(palette = "YlOrRd", direction = 1)+
+  theme(axis.text = element_text(size=14), axis.title=element_text(size=16))+
+  #theme(axis.text.y = element_text(color = type))+
+  labs(x="NES", y="Term", fill="-log10(FDR)")
+ggsave("../plots/expression-disease-duration-correlation/terms-with-negative-disease-duration-correlation-v2.pdf", width = 8, height = 6)
+
+
+plotEnrichment(pathway = cts$FAN_EMBRYONIC_CTX_BIG_GROUPS_MICROGLIA, stats = ranks)+
+  labs(x="Rank", y="Enrichment score")
+ggsave("../plots/expression-disease-duration-correlation/GSEA-disease-duration-microglia.png", width = 6, height = 4)
+
+plotEnrichment(pathway = pathwaysAll$REACTOME_CHOLESTEROL_BIOSYNTHESIS, stats = ranks)+
+  labs(x="Rank", y="Enrichment score")
+ggsave("../plots/expression-disease-duration-correlation/GSEA-disease-duration-cholesterol.png", width = 6, height = 4)
+
+plotEnrichment(pathway = goAll$GOBP_INNATE_IMMUNE_RESPONSE, stats = ranks)
+
+###
+gseaRes %>%
+  dplyr::filter(forViz==T) %>%
+  dplyr::filter(NES>0) %>%
+  dplyr::arrange(padj) %>% 
+  dplyr::slice_head(n = 10) %>%
+  ggplot(aes(x=NES, y=reorder(nameForPlot, -NES), color= -log10(padj)))+
+  #geom_bar(stat = "identity")+
+  geom_point(size=3)+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))+
+  theme_bw()+
+  #theme(axis.text.y = element_text(color = type))+
+  labs(x="NES", y="Term", fill="-log10(FDR)")
+
+### Combined
+gseaRes %>%
+  dplyr::filter(forViz==T) %>%
+  dplyr::filter(NES>0) %>%
+  dplyr::arrange(padj) %>% 
+  dplyr::slice_head(n = 10) -> top10
+
+gseaRes %>%
+  dplyr::filter(forViz==T) %>%
+  dplyr::filter(NES<0) %>%
+  dplyr::arrange(padj) %>% 
+  dplyr::slice_head(n = 10) -> bottom10
+
+top20<-rbind(top10, bottom10)
+
+top20 %>%
+  ggplot(aes(x=NES, y=reorder(nameForPlot, NES), fill= -log10(padj)))+
+  geom_bar(stat = "identity")+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30))+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title=element_text(size=16))+
+  scale_fill_distiller(palette = "YlOrRd")+
+  #theme(axis.text.y = element_text(color = type))+
+  labs(x="NES", y="Term", fill="-log10(FDR)")
+ggsave("../plots/expression-disease-duration-correlation/terms-with-both-disease-duration-correlation-v2.pdf", width = 12, height = 12)
+
+top20 %>%
+  ggplot(aes(x=NES, y=reorder(nameForPlot, NES), fill= -log10(padj)))+
+  geom_bar(stat = "identity")+
+  geom_text(aes(label=signif(padj,3)), hjust = 1)+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30))+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title=element_text(size=16))+
+  scale_fill_distiller(palette = "YlOrRd")+
+  #theme(axis.text.y = element_text(color = type))+
+  labs(x="NES", y="Term", fill="-log10(FDR)")
+ggsave("../plots/expression-disease-duration-correlation/terms-with-both-disease-duration-correlation-v3.pdf", width = 12, height = 12)
+
+
+top20 %>%
+  ggplot(aes(x=NES, y=reorder(nameForPlot, -NES), color= -log10(padj)))+
+  geom_point()+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title=element_text(size=16))+
+  #theme(axis.text.y = element_text(color = type))+
+  labs(x="NES", y="Term", fill="-log10(FDR)")
+```
+
+
+### Correlate proportion of immune proportion from figure 2i OR immune cell proportion changes
+
+### Correlate proportion of macrophages from CIBERSORT
+
+
+```{R}
+cbProp<-read.table("../output/CIBERSORT/2023/Spinal/CIBERSORTx_Job96_Adjusted_2024Samples_expr0.5-rep25_TMM.txt", sep="\t", header=T, stringsAsFactors = F, quote="")
+cbProp$P.value<-cbProp$Correlation<-cbProp$RMSE<-NULL
+
+cbProp$immuneCells<-cbProp$Macrophages+cbProp$Microglia+cbProp$ProliferatingMicroglia+cbProp$Lymphocytes
+
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) -> cbMerge
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$Macrophages)
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$Microglia)
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$Lymphocytes)
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$immuneCells)
+
+cor(cbMerge$immuneCells, cbMerge$Disease.Duration.in.Months)
+cor(cbMerge$immuneCells2, cbMerge$Disease.Duration.in.Months)
+
+
+corVal<-signif(cor(cbMerge$immuneCells, cbMerge$Disease.Duration.in.Months), 3)
+pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge$immuneCells))$coefficients[2,4], 3)
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(y=immuneCells, x=Disease.Duration.in.Months))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", y = 0.4, x = 200, label = paste0("r=", corVal, "\np=", pVal), size=6)+
+  labs(y="Proportion of immune cells", x="Disease duration in months", title = "Immune cell proportion and disease duration")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/immune-cells-and-disease-duration-v2.pdf", width = 8, height = 6)
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(y=immuneCells, x=Disease.Duration.in.Months))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", y = 0.4, x = 200, label = paste0("r=", corVal, "\np=", pVal), size=6)+
+  labs(y="Proportion of immune cells", x="Disease duration in months", title = "Immune cell proportion and disease duration")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+
+corValAst<-signif(cor(cbMerge$Astrocytes, cbMerge$Disease.Duration.in.Months), 3)
+pValAst<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge$Astrocytes))$coefficients[2,4], 3)
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(y=Astrocytes, x=Disease.Duration.in.Months))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", y = 0.4, x = 200, label = paste0("r=", corValAst, "\np=", pValAst), size=6)+
+  labs(y="Proportion of sstrocytes", x="Disease duration in months", title = "Astrocyte proportion and disease duration")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+
+
+
+### Age at symptom onset
+cbProp %>%
+  inner_join(cervSO, by=c("Mixture"="ExternalSampleId")) -> cbMerge2
+
+corVal<-signif(cor(cbMerge2$immuneCells, cbMerge2$Age.at.Symptom.Onset), 3)
+pVal<-signif(summary(lm(cbMerge2$Age.at.Symptom.Onset ~ cbMerge2$immuneCells))$coefficients[2,4], 3)
+
+cbProp %>%
+  inner_join(cervSO, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(y=immuneCells, x=Age.at.Symptom.Onset))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", y = 0.4, x = 75, label = paste0("r=", corVal, "\np=", pVal), size=6)+
+  labs(y="Proportion of immune cells", x="Age at Symptom Onset", title = "Immune cell proportion and age of onset")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/immune-cells-and-age-at-symptom-onset.pdf", width = 8, height = 6)
+ggsave("../plots/expression-disease-duration-correlation/immune-cells-and-age-at-symptom-onset.png", width = 8, height = 6)
+
+
+###
+corVal<-signif(cor(cbMerge$immuneCells, cbMerge$Disease.Duration.in.Months), 3)
+pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge$immuneCells))$coefficients[2,4], 3)
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(y=immuneCells, x=Disease.Duration.in.Months))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", y = 0.4, x = 200, label = paste0("r=", corVal, "\np=", pVal), size=6)+
+  labs(x="Proportion of immune cells", y="Disease duration in months", title = "Immune cell proportion and disease duration")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+
+### Macrophages
+corVal<-signif(cor(cbMerge$Macrophages, cbMerge$Disease.Duration.in.Months), 3)
+pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge$Macrophages))$coefficients[2,4], 3)
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(x=Macrophages, y=Disease.Duration.in.Months))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", x = 0.15, y = 200, label = paste0("r=", corVal, "\np=", pVal), size=6)+
+  labs(x="Proportion of macrophages", y="Disease duration in months", title = "Macrophage proportion and disease duration")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/macrophages-and-disease-duration.pdf", width = 8, height = 6)
+
+### microglia
+corVal<-signif(cor(cbMerge$Microglia, cbMerge$Disease.Duration.in.Months), 3)
+pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge$Microglia))$coefficients[2,4], 3)
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(y=Microglia, x=Disease.Duration.in.Months))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", y = 0.15, x = 200, label = paste0("r=", corVal, "\np=", pVal), size=6)+
+  labs(y="Proportion of microglia", x="Disease duration in months", title = "Microglia proportion and disease duration")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/Microglia-and-disease-duration-v2.pdf", width = 8, height = 6)
+
+### lymphocytes
+corVal<-signif(cor(cbMerge$Lymphocytes, cbMerge$Disease.Duration.in.Months), 3)
+pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge$Lymphocytes))$coefficients[2,4], 3)
+
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) %>%
+  ggplot(aes(x=Lymphocytes, y=Disease.Duration.in.Months))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  annotate("text", x = 0.05, y = 200, label = paste0("r=", corVal, "\np=", pVal), size=6)+
+  labs(x="Proportion of lymphocytes", y="Disease duration in months", title = "Lymphocyte proportion and disease duration")+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))
+ggsave("../plots/expression-disease-duration-correlation/Lymphocytes-and-disease-duration.pdf", width = 8, height = 6)
+
+### ALso check age at symptom onset
+
+### Check correlation for all cell types
+cbProp %>%
+  inner_join(cervDD, by=c("Mixture"="ExternalSampleId")) -> cbMerge
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$Macrophages)
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$Microglia)
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$Lymphocytes)
+cor(cbMerge$Disease.Duration.in.Months, cbMerge$immuneCells)
+
+cellTypes<-colnames(cbProp)[-1]
+corList<-list()
+
+for(i in 1:length(cellTypes)){
+  thisCt<-cellTypes[i]
+  
+  corVal<-signif(cor(cbMerge[,thisCt], cbMerge$Disease.Duration.in.Months), 3)
+  pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge[,thisCt]))$coefficients[2,4], 3)
+
+  corTmp<-data.frame(cellType=thisCt,
+                     correlationWithDiseaseDuration=corVal,
+                     pVal=pVal)
+  corList[[i]]<-corTmp
+}
+
+#corDf<-bind_rows(corList)
+cervDf<-bind_rows(corList)
+
+### Plot all cell types
+cbMerge %>%
+  dplyr::select(-ExternalSubjectId, -Subject.Group2) %>%
+  pivot_longer(-c(Mixture, Disease.Duration.in.Months), names_to = "cellType", values_to = "proportion") %>%
+  ggplot(aes(x=Disease.Duration.in.Months, y=proportion, color=cellType))+
+  geom_smooth(method = "lm")
+
+cbMerge %>%
+  dplyr::select(-ExternalSubjectId, -Subject.Group2) %>%
+  pivot_longer(-c(Mixture, Disease.Duration.in.Months), names_to = "cellType", values_to = "proportion") %>%
+  ggplot(aes(x=Disease.Duration.in.Months, y=proportion, color=cellType))+
+  geom_point(size=1, alpha=0.5)+
+  geom_smooth(method = "lm", se = F)+
+  scale_color_discrete(type = RColorBrewer::brewer.pal(n = 9, name = "Set1"))+
+  theme_classic()+
+  theme(axis.text = element_text(size=14),
+        axis.title = element_text(size = 16))+
+  labs(x="Disease duration in months", y = "log2(CPM)", color="Gene")
+ggsave("../plots/expression-disease-duration-correlation/cellTypes-and-diseaseDuration.pdf", width = 8, height = 6)
+
+
+### Lumbar
+cbProp %>%
+  inner_join(lumbDD, by=c("Mixture"="ExternalSampleId")) -> cbMerge
+
+corList<-list()
+
+for(i in 1:length(cellTypes)){
+  thisCt<-cellTypes[i]
+  
+  corVal<-signif(cor(cbMerge[,thisCt], cbMerge$Disease.Duration.in.Months), 3)
+  pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge[,thisCt]))$coefficients[2,4], 3)
+
+  corTmp<-data.frame(cellType=thisCt,
+                     correlationWithDiseaseDuration=corVal,
+                     pVal=pVal)
+  corList[[i]]<-corTmp
+}
+
+lumbDf<-bind_rows(corList)
+
+### thoracic
+cbProp %>%
+  inner_join(thorDD, by=c("Mixture"="ExternalSampleId")) -> cbMerge
+
+corList<-list()
+
+for(i in 1:length(cellTypes)){
+  thisCt<-cellTypes[i]
+  
+  corVal<-signif(cor(cbMerge[,thisCt], cbMerge$Disease.Duration.in.Months), 3)
+  pVal<-signif(summary(lm(cbMerge$Disease.Duration.in.Months ~ cbMerge[,thisCt]))$coefficients[2,4], 3)
+
+  corTmp<-data.frame(cellType=thisCt,
+                     correlationWithDiseaseDuration=corVal,
+                     pVal=pVal)
+  corList[[i]]<-corTmp
+}
+
+thorDf<-bind_rows(corList)
+
+cervDf$tissue<-"Cervical"
+lumbDf$tissue<-"Lumbar"
+thorDf$tissue<-"Thoracic"
+
+cervDf %>%
+  dplyr::mutate(label=paste0("r = ", correlationWithDiseaseDuration, "; p = ", signif(pVal, digits = 3))) %>%
+  dplyr::mutate(logP= -log10(pVal)) %>%
+  dplyr::mutate(color= logP * sign(correlationWithDiseaseDuration)) %>%
+  ggplot(aes(x=1, y=reorder(cellType, correlationWithDiseaseDuration), fill=color, label=label))+
+  geom_tile(show.legend = F)+
+  geom_text(size = 4)+
+  scale_fill_gradient2()+
+  labs(y=NULL)+
+  theme_classic()+
+  theme(axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 12))
+ggsave("../plots/CIBERSORT/withNYGC/Spinal/Cervical-correlation-with-disease-duration-v2.pdf", width = 4, height = 6)
+ggsave("../plots/CIBERSORT/withNYGC/Spinal/Cervical-correlation-with-disease-duration.png", width = 4, height = 7)
+ggsave("../plots/CIBERSORT/withNYGC/Spinal/Cervical-correlation-with-disease-duration.tiff", width = 4, height = 7)
+ggsave("../plots/CIBERSORT/withNYGC/Spinal/Cervical-correlation-with-disease-duration.svg", width = 4, height = 7)
+
+### Horizontal
+cervDf %>%
+  dplyr::mutate(label=paste0("r = ", correlationWithDiseaseDuration, "\np = ", signif(pVal, digits = 3))) %>%
+  dplyr::mutate(logP= -log10(pVal)) %>%
+  dplyr::mutate(color= logP * sign(correlationWithDiseaseDuration)) %>%
+  ggplot(aes(x=1, y=reorder(cellType, -correlationWithDiseaseDuration), fill=color, label=label))+
+  geom_tile(show.legend = F)+
+  geom_text(size = 4)+
+  scale_fill_gradient2()+
+  labs(y=NULL)+
+  coord_flip()+
+  theme_classic()+
+  theme(axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(size = 12, angle=30, hjust = 1))
+ggsave("../plots/CIBERSORT/withNYGC/Spinal/Cervical-correlation-with-disease-duration-horiz.pdf", width = 12, height = 2)
+
+
+###
+allDF<-rbind(cervDf, lumbDf, thorDf)
+allDF$fdr<-p.adjust(allDF$pVal, method="fdr")
+
+allDF$logP<- -log10(allDF$fdr)
+
+allDF %>%
+  dplyr::select(cellType, correlationWithDiseaseDuration, pVal, tissue) %>%
+  pivot_wider(names_from = tissue, values_from = c(correlationWithDiseaseDuration, pVal))
+ 
+```
+
+### Correlate STMN2 with disease duration or immune cells
+
+```{R}
+stmn<-read.table("../output/tdpCounts/junctions/cervical/STMN2-ENSG00000104435.14s79611117-79611214.txt", sep="\t", header=T, stringsAsFactors = F, quote="")
+
+
+
+stmnDF<-data.frame(sample=colnames(stmn)[10:ncol(stmn)], 
+                   correctSplicing=as.numeric(stmn[2,10:ncol(stmn)]),
+                   incorrectSplicing=as.numeric(stmn[1,10:ncol(stmn)]))
+
+stmnDF$misspliceProportion<-stmnDF$incorrectSplicing/(stmnDF$incorrectSplicing+stmnDF$correctSplicing)
+stmnDF$tdp<-ifelse(stmnDF$misspliceProportion>0, T, F)
+
+write.table(stmnDF, "../output/TablesForManuscript/STMN2-missplicing.txt", sep="\t", col.names = T, row.names = F, quote=F)
+
+### For Fig 6j
+### Plot APOC1 vs. STMN
+cervCPM %>%
+  dplyr::filter(external_gene_name=="APOC1") %>% 
+  dplyr::select(4:ncol(thisRow)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(stmnDF, by=c("Sample"="sample")) -> exprSTMN
+
+exprSTMN %>%
+  dplyr::filter(!is.na(tdp)) %>%
+  ggplot(aes(x=tdp, y=logCPM))+
+  geom_boxplot()+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))+
+  ggpubr::stat_compare_means(label.x = 1.2, size=6)+
+  labs(x="Has missplicing", y="APOC1 expression (logCPM)")
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-APOC1-binary.png", width = 4, height = 6)
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-APOC1-binary.pdf", width = 4, height = 6)
+
+### Plot C1QC vs. STMN
+cervCPM %>%
+  dplyr::filter(external_gene_name=="C1QC") %>% 
+  dplyr::select(4:ncol(thisRow)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(stmnDF, by=c("Sample"="sample")) -> exprSTMN
+
+exprSTMN %>%
+  dplyr::filter(!is.na(tdp)) %>%
+  ggplot(aes(x=tdp, y=logCPM))+
+  geom_boxplot()+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))+
+  ggpubr::stat_compare_means(label.x = 1.2, size=6)+
+  labs(x="Has missplicing", y="C1QC expression (logCPM)")
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-C1QC-binary.png", width = 4, height = 6)
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-C1QC-binary.pdf", width = 4, height = 6)
+
+### Plot C1QB vs. STMN
+cervCPM %>%
+  dplyr::filter(external_gene_name=="C1QB") %>% 
+  dplyr::select(4:ncol(thisRow)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(stmnDF, by=c("Sample"="sample")) -> exprSTMN
+
+exprSTMN %>%
+  dplyr::filter(!is.na(tdp)) %>%
+  ggplot(aes(x=tdp, y=logCPM))+
+  geom_boxplot()+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))+
+  ggpubr::stat_compare_means(label.x = 1.2, size=6)+
+  labs(x="Has missplicing", y="C1QB expression (logCPM)")
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-C1QB-binary.png", width = 4, height = 6)
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-C1QB-binary.pdf", width = 4, height = 6)
+
+### Plot C1QA vs. STMN
+cervCPM %>%
+  dplyr::filter(external_gene_name=="C1QA") %>% 
+  dplyr::select(4:ncol(thisRow)) %>%
+  t() %>%
+  as.data.frame() %>%
+  dplyr::rename(CPM=1) %>%
+  dplyr::mutate(logCPM=log2(CPM+1)) %>%
+  rownames_to_column("Sample") %>%
+  inner_join(stmnDF, by=c("Sample"="sample")) -> exprSTMN
+
+exprSTMN %>%
+  dplyr::filter(!is.na(tdp)) %>%
+  ggplot(aes(x=tdp, y=logCPM))+
+  geom_boxplot()+
+  theme_classic()+
+  theme(axis.text = element_text(size=14), axis.title = element_text(size=16))+
+  ggpubr::stat_compare_means(label.x = 1.2, size=6)+
+  labs(x="Has missplicing", y="C1QA expression (logCPM)")
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-C1QA-binary.png", width = 4, height = 6)
+ggsave("../plots/expression-disease-duration-correlation/STMN-missplicing/STMN-proportion-vs-C1QA-binary.pdf", width = 4, height = 6)
+
+```
