@@ -1,0 +1,372 @@
+---
+title: "TargetALS-long-short-disease-duration"
+output: html_document
+date: "2025-05-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R}
+library(tidyverse)
+#library(DESeq2)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+
+
+```{R}
+allMD<-read.table("../output/DESeq2/2023/2023-metadata-v2-fixed-filtered.txt", sep="\t", header=T, stringsAsFactors = F, quote="")
+
+### Define disease duration using all ALS patients
+patDD<-allMD[,c("ExternalSubjectId", "Subject.Group2", "Disease.Duration.in.Months")]
+patDD<-patDD[!(duplicated(patDD$ExternalSubjectId)),]
+patDDALS<-patDD[which(patDD$Subject.Group2=="ALS"),]
+
+patDDALS<-patDDALS[which(patDDALS$Disease.Duration.in.Months!="Unknown"),]
+patDDALS$Disease.Duration.in.Months<-as.numeric(patDDALS$Disease.Duration.in.Months)
+
+png("../plots/DESeq2/short-long-disease/patient-DD-histogram.png", width = 8, height = 6,units = "in", res = 300)
+hist(patDDALS$Disease.Duration.in.Months, breaks = 30, main="ALS Disease Duration per patient", xlab = "Disease Duration (mo)")
+dev.off()
+
+lowQtr<-quantile(patDDALS$Disease.Duration.in.Months)[2]
+highQtr<-quantile(patDDALS$Disease.Duration.in.Months)[4]
+
+patDDALS$lengthGroup<-ifelse(patDDALS$Disease.Duration.in.Months<lowQtr, "Short",
+                              ifelse(patDDALS$Disease.Duration.in.Months>highQtr, "Long", "Intermediate"))
+
+shortPats<-patDDALS$ExternalSubjectId[which(patDDALS$lengthGroup=="Short")]
+intPats<-patDDALS$ExternalSubjectId[which(patDDALS$lengthGroup=="Intermediate")]
+longPats<-patDDALS$ExternalSubjectId[which(patDDALS$lengthGroup=="Long")]
+
+png("../plots/DESeq2/short-long-disease/patient-DD-histogram-v2.png", width = 6, height = 4, units = "in", res = 300)
+{
+  hist(patDDALS$Disease.Duration.in.Months, breaks = 30, main="ALS Disease Duration per patient", xlab = "Disease Duration (mo)")
+  abline(v = lowQtr, col="red", lty=2, lwd=2)
+  abline(v = highQtr, col="red", lty=2, lwd=2)
+}
+dev.off()
+
+table(patDDALS$lengthGroup)
+
+allMD$lengthGroup<-ifelse(allMD$ExternalSubjectId %in% shortPats, "Short",
+                          ifelse(allMD$ExternalSubjectId %in% longPats, "Long", 
+                                 ifelse(allMD$ExternalSubjectId %in% intPats, "Intermediate", NA)))
+
+tmpDf<-as.data.frame(table(allMD$lengthGroup, allMD$Sample.group2))
+tmpDf<-tmpDf[!is.na(tmpDf$Var1),]
+
+
+```
+
+### Proportions
+
+```{R}
+
+props<-read.table("../output/CIBERSORT/2023/Spinal/CIBERSORTx_Job96_Adjusted_2024Samples_expr0.5-rep25_TMM.txt", sep="\t", header=T, stringsAsFactors = F, quote="")
+props$P.value<-props$Correlation<-props$RMSE<-NULL
+
+#cbProps<-read.table("../output/CIBERSORT/spinal/expr0.5/CIBERSORTx_Adjusted.txt", sep="\t", header=T, stringsAsFactors = F, quote="")
+#cbProps$P.value<-cbProps$Correlation<-cbProps$RMSE<-NULL
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  ggplot(aes(x=cellType, y = proportion, fill=cellType))+
+  geom_boxplot(show.legend = F)+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))
+#ggsave("../plots/CIBERSORT/withNYGC/Spinal/Yadav-T-NK/Yadav-old-boxplot.png", width = 12, height = 6)
+
+#table(mdSRR$sampleGroup1)
+
+props %>% 
+  gather(-Mixture, key="Celltype", value="proportion") %>% 
+  inner_join(allMD, by=c("Mixture"="ExternalSampleId")) %>%
+  dplyr::filter(Subject.Group2 %in% c("Control", "ALS")) %>%
+  dplyr::filter(Sample.group2!="Spinal_Cord_Unspecified") %>%
+  group_by(Sample.group2, Celltype) %>%
+  dplyr::select(Sample.group2, Celltype, Subject.Group2, proportion) %>%
+  summarise(logFC.ALS=log2(mean(proportion[Subject.Group2=="ALS"])/mean(proportion[Subject.Group2=="Control"]))) %>%
+  pivot_wider(names_from = "Sample.group2", values_from = "logFC.ALS") %>%
+  as.data.frame() -> spinal.fcs
+
+rownames(spinal.fcs)<-spinal.fcs$Celltype
+spinal.fcs$Celltype<-NULL
+
+### Get pvalues
+props %>% 
+  gather(-Mixture, key="Celltype", value="proportion") %>% 
+  inner_join(allMD, by=c("Mixture"="ExternalSampleId")) %>%
+  dplyr::filter(Subject.Group2 %in% c("Control", "ALS")) %>%
+  dplyr::filter(Sample.group2!="Spinal_Cord_Unspecified") %>%
+  group_by(Sample.group2, Celltype) %>%
+  dplyr::select(Sample.group2, Celltype, Subject.Group2, proportion) %>%
+  summarise(p.ALS=wilcox.test(proportion[Subject.Group2=="ALS"], proportion[Subject.Group2=="Control"])$p.value) %>%
+  pivot_wider(names_from = "Sample.group2", values_from = "p.ALS") %>%
+  as.data.frame() -> spinal.p
+
+rownames(spinal.p)<-spinal.p$Celltype
+spinal.p$Celltype<-NULL
+
+colnames(spinal.fcs)<-unlist(lapply(str_split(colnames(spinal.fcs), pattern = "_"), "[[", 3))
+
+### CA7C1B
+### e69e3f
+myCol <- colorRampPalette(c('#136176', 'white', '#CA7C1B'))(100)
+myBreaks <- seq(-1, 1, length.out = 100)
+#myCol <- colorRampPalette(c('dodgerblue3', 'grey85', 'firebrick3'))(100)
+#myBreaks <- seq(-1, 1, length.out = 100)
+
+
+ctOrder<-rownames(spinal.fcs)[order(rowMeans(spinal.fcs), decreasing = T)]
+
+#pdf("../plots/CIBERSORT/withNYGC/Spinal/Yadav-T-NK/Yadav-old-heatmap.pdf", width = 5.5, height = 6)
+#png("../plots/CIBERSORT/withNYGC/Spinal/Yadav-T-NK/Yadav-old-heatmap.png", width = 5.5, height = 6, units = "in", res = 300)
+ht<-Heatmap(spinal.fcs, 
+            name="log2(FC) vs.\nhealthy", 
+            row_order = ctOrder,
+            col = colorRamp2(myBreaks, myCol), 
+            rect_gp = gpar(col = "black", lwd = 1),
+            column_names_rot = 30,
+            column_names_centered = T, 
+            cluster_columns = F,
+            cluster_column_slices = F,
+            cluster_rows = F, 
+            row_names_side = "left",
+            show_row_dend = F, 
+            show_heatmap_legend = T,
+            row_names_gp = gpar(fontsize = 16,
+                                fontface = 1),
+            column_names_gp = gpar(fontsize = 14,
+                                   fontface = 1), 
+            heatmap_legend_param = list(title_gp = gpar(fontsize = 14,
+                                                        fontface = 2), 
+                                        labels_gp = gpar(fontsize = 12, fontface=1)),
+            cell_fun = function(j, i, x, y, w, h, fill) {
+    if(spinal.p[i, j] < 0.0001) {
+        grid.text("****", x, y, gp = gpar(fill = "black", col = "black", fontsize = 20))
+    } else if(spinal.p[i, j] < 0.001) {
+        grid.text("***", x, y, gp = gpar(fill = "black", col = "black", fontsize = 20))
+    } else if(spinal.p[i, j] < 0.01) {
+        grid.text("**", x, y, gp = gpar(fill = "black", col = "black", fontsize = 20))
+    } else if(spinal.p[i, j] < 0.05) {
+        grid.text("*", x, y, gp = gpar(fill = "black", col = "black", fontsize = 20))
+    }
+})
+draw(ht, padding = unit(c(5, 5, 5, 5), "mm"))
+#dev.off()
+
+
+###
+cervMD<-allMD[which(allMD$Sample.group2=="Spinal_Cord_Cervical"),]
+cervMDALS<-cervMD[which(cervMD$Subject.Group2=="ALS"),]
+cervMDALS$Disease.Duration.in.Months<-as.numeric(cervMDALS$Disease.Duration.in.Months)
+cervMDALS<-cervMDALS[!is.na(cervMDALS$Disease.Duration.in.Months),]
+
+lowQtr<-quantile(cervMDALS$Disease.Duration.in.Months)[2]
+highQtr<-quantile(cervMDALS$Disease.Duration.in.Months)[4]
+
+cervMDALS$lengthGroup<-ifelse(cervMDALS$Disease.Duration.in.Months<lowQtr, "Short",
+                              ifelse(cervMDALS$Disease.Duration.in.Months>highQtr, "Long", "Intermediate"))
+cervMDALS$lengthGroup2<-ifelse(cervMDALS$Disease.Duration.in.Months<=lowQtr, "Short",
+                              ifelse(cervMDALS$Disease.Duration.in.Months>=highQtr, "Long", "Intermediate"))
+
+table(cervMDALS$lengthGroup)
+table(cervMDALS$lengthGroup2)
+
+props %>%
+  gather(-Mixture, key="Celltype", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  group_by(lengthGroup, Celltype) -> tmpP
+
+props %>%
+  gather(-Mixture, key="Celltype", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=as.factor(lengthGroup)) %>%
+  group_by(lengthGroup, Celltype) %>%
+  dplyr::do(Model = aov(proportion ~ lengthGroup, data=.)) -> tmpP2
+
+props %>%
+  gather(-Mixture, key="Celltype", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  group_by(lengthGroup, Celltype) %>%
+  aov(proportion ~ lengthGroup, data=.) %>%
+  summary
+
+summary(aov(tmpP$proportion ~ tmpP$lengthGroup))
+
+#%>%
+#  summarise(p.ALS=wilcox.test(proportion[Subject.Group2=="ALS"], proportion[Subject.Group2=="Control"])$p.value) %>%
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif")
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(cellType=="Macrophages") -> oneCT
+
+a1<-aov(proportion ~ lengthGroup, data = oneCT)
+
+TukeyHSD(a1)
+
+### Lumbar
+lumbMD<-allMD[which(allMD$Sample.group2=="Spinal_Cord_Lumbar"),]
+lumbMDALS<-lumbMD[which(lumbMD$Subject.Group2=="ALS"),]
+lumbMDALS$Disease.Duration.in.Months<-as.numeric(lumbMDALS$Disease.Duration.in.Months)
+lumbMDALS<-lumbMDALS[!is.na(lumbMDALS$Disease.Duration.in.Months),]
+
+lowQtr<-quantile(lumbMDALS$Disease.Duration.in.Months)[2]
+highQtr<-quantile(lumbMDALS$Disease.Duration.in.Months)[4]
+
+lumbMDALS$lengthGroup<-ifelse(lumbMDALS$Disease.Duration.in.Months<lowQtr, "Short",
+                              ifelse(lumbMDALS$Disease.Duration.in.Months>highQtr, "Long", "Intermediate"))
+lumbMDALS$lengthGroup2<-ifelse(lumbMDALS$Disease.Duration.in.Months<=lowQtr, "Short",
+                              ifelse(lumbMDALS$Disease.Duration.in.Months>=highQtr, "Long", "Intermediate"))
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(lumbMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif")
+
+### Thoracic
+thorMD<-allMD[which(allMD$Sample.group2=="Spinal_Cord_Thoracic"),]
+thorMDALS<-thorMD[which(thorMD$Subject.Group2=="ALS"),]
+thorMDALS$Disease.Duration.in.Months<-as.numeric(thorMDALS$Disease.Duration.in.Months)
+thorMDALS<-thorMDALS[!is.na(thorMDALS$Disease.Duration.in.Months),]
+
+lowQtr<-quantile(thorMDALS$Disease.Duration.in.Months)[2]
+highQtr<-quantile(thorMDALS$Disease.Duration.in.Months)[4]
+
+thorMDALS$lengthGroup<-ifelse(thorMDALS$Disease.Duration.in.Months<lowQtr, "Short",
+                              ifelse(thorMDALS$Disease.Duration.in.Months>highQtr, "Long", "Intermediate"))
+thorMDALS$lengthGroup2<-ifelse(thorMDALS$Disease.Duration.in.Months<=lowQtr, "Short",
+                              ifelse(thorMDALS$Disease.Duration.in.Months>=highQtr, "Long", "Intermediate"))
+
+
+### All together
+allMDALS<-allMD[which(allMD$Subject.Group2=="ALS"),]
+#allMDALS$Disease.Duration.in.Months<-as.numeric(allMDALS$Disease.Duration.in.Months)
+#allMDALS<-allMDALS[!is.na(allMDALS$Disease.Duration.in.Months),]
+
+#lowQtr<-quantile(allMDALS$Disease.Duration.in.Months)[2]
+#highQtr<-quantile(allMDALS$Disease.Duration.in.Months)[4]
+
+#allMDALS$lengthGroup<-ifelse(allMDALS$Disease.Duration.in.Months<lowQtr, "Short",
+#                              ifelse(allMDALS$Disease.Duration.in.Months>highQtr, "Long", "Intermediate"))
+#allMDALS$lengthGroup2<-ifelse(allMDALS$Disease.Duration.in.Months<=lowQtr, "Short",
+#                              ifelse(allMDALS$Disease.Duration.in.Months>=highQtr, "Long", "Intermediate"))
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(allMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif")
+
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(lengthGroup!="Intermediate") %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif")
+#ggsave("../plots/CIBERSORT/long-short-disease/Cervical-proportions.png", width = 8, height = 6)
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(lumbMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(lengthGroup!="Intermediate") %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif")
+#ggsave("../plots/CIBERSORT/long-short-disease/Lumbar-proportions.png", width = 8, height = 6)
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(thorMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(lengthGroup!="Intermediate") %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif")
+#ggsave("../plots/CIBERSORT/long-short-disease/Thoracic-proportions.png", width = 8, height = 6)
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(allMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(lengthGroup!="Intermediate") %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif")
+#ggsave("../plots/CIBERSORT/long-short-disease/AllSpinal-proportions.png", width = 8, height = 6)
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(lengthGroup!="Intermediate") %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot(outlier.shape = NA, show.legend = T)+
+  labs(x=NULL, y="Proportion")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14))+
+  ggpubr::stat_compare_means(label = "p.signif", hide.ns = T)
+ggsave("../plots/CIBERSORT/long-short-disease/20250924-Cervical-proportions.pdf", width = 8, height = 4)
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(cervMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(lengthGroup!="Intermediate") %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot(outlier.shape = NA, show.legend = T)+
+  labs(x=NULL, y="Proportion")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14))+
+  ggpubr::stat_compare_means(label = "p.signif", method = "wilcox.test", hide.ns = T)
+
+props %>%
+  gather(-Mixture, key="cellType", value="proportion") %>% 
+  inner_join(allMDALS, by=c("Mixture"="ExternalSampleId")) %>%
+  mutate(lengthGroup=factor(lengthGroup, levels = c("Short", "Intermediate", "Long"))) %>%
+  dplyr::filter(lengthGroup!="Intermediate") %>%
+  ggplot(aes(x=cellType, y=proportion, fill = lengthGroup))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle=30, hjust = 1))+
+  ggpubr::stat_compare_means(label = "p.signif", hide.ns = T)
+ggsave("../plots/CIBERSORT/long-short-disease/20250924-AllSpinal-proportions.pdf", width = 8, height = 6)
+
+```
